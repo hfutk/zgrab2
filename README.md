@@ -128,35 +128,28 @@ echo 192.0.2.1 | ./zgrab2 rdp -p 33890
 
 ### Web Filter (http module)
 
-The HTTP module ships an optional response-fingerprint filter, ported from the
-standalone `web_filter.py` tool. When enabled, each response is classified and
-non-business pages in the active drop set are reported as `application-error`
-(keeping the full result plus a `web_filter` verdict), so direct business web
-applications can be selected by status:
+The HTTP module ships an optional response-fingerprint classifier, ported from
+the standalone `web_filter.py` tool. When enabled with `--web-filter`, every
+response gets a `web_filter` label naming what kind of page it is. zgrab2 has
+no concept of dropping targets: classification is pure metadata, the scan
+status is never changed — select the labels you want downstream (see the `jq`
+examples below).
 
-| Category | Contents | Dropped by default |
-|----------|----------|--------------------|
-| `proxy`  | 407 / Proxy-Authenticate / Squid / Tinyproxy pages | yes |
-| `cdn`    | Cloudflare / CloudFront / Fastly / Akamai / CN CDN / "domain not configured" pages | yes |
-| `waf`    | Aliyun / Tencent / Safedog / Safeline / Incapsula / F5 ... block & challenge pages | yes |
-| `default`| nginx / Apache / IIS / Tomcat / OpenResty default pages, "Index of /" | yes |
-| `panel`  | BT-Panel / phpMyAdmin / bastion hosts / iDRAC / IPMI panels | no (`--web-filter-drop panel` to enable) |
-| `device` | SSL VPN / router / camera / printer / Wi-Fi portal UIs | no (`--web-filter-drop device` to enable) |
+| Category | Meaning |
+|----------|---------|
+| `business` | no fingerprint matched — presumed direct business web application |
+| `proxy`  | auth-required / open HTTP proxies: 407, Proxy-Authenticate, Squid / Tinyproxy pages |
+| `cdn`    | Cloudflare / CloudFront / Fastly / Akamai / CN CDN / "domain not configured" edge pages |
+| `waf`    | Aliyun / Tencent / Safedog / Safeline / Incapsula / F5 ... block & challenge pages |
+| `default`| nginx / Apache / IIS / Tomcat / OpenResty default pages, "Index of /" |
+| `panel`  | admin panels: BT-Panel / phpMyAdmin / bastion hosts / iDRAC / IPMI |
+| `device` | SSL VPN / router / camera / printer / Wi-Fi portal UIs |
 
 ```shell
-# Drop proxy/cdn/waf/default pages; keep everything else
+# Label every response (43 built-in fingerprint rules)
 zgrab2 http -p 80,443,8080 --web-filter < targets.txt
 
-# Also drop admin panels and device UIs
-zgrab2 http --web-filter --web-filter-drop=proxy,cdn,waf,default,panel,device < targets.txt
-
-# Only annotate results (web_filter block) without changing the scan status
-zgrab2 http --web-filter --web-filter-tag-only < targets.txt
-
-# Keep default pages even though they are in the default drop set
-zgrab2 http --web-filter --web-filter-keep=default < targets.txt
-
-# Dump the active fingerprint rules as JSON (43 built-in rules)
+# Dump the active fingerprint rules as JSON
 zgrab2 http --web-filter-dump-rules
 
 # Append custom rules (same schema as the dump output; files written for
@@ -165,19 +158,25 @@ zgrab2 http --web-filter-dump-rules
 zgrab2 http --web-filter --web-filter-rules=extra_rules.json
 ```
 
-Results contain a `web_filter` object, and dropped categories are returned
-with status `application-error` (unless `--web-filter-tag-only` is set):
+Successful responses carry a `web_filter` object (the verdict never changes
+the scan status):
 
 ```json
-"web_filter": {"filtered": true, "category": "waf", "rule": "aliyun_waf",
-               "reason": "阿里云WAF/云盾拦截页", "dropped": true}
+"web_filter": {"matched": true, "category": "waf", "rule": "aliyun_waf",
+               "reason": "阿里云WAF/云盾拦截页"}
 ```
 
-Split business applications from dropped targets with `jq`:
+Split business applications from non-business pages by label with `jq`:
 
 ```shell
-jq 'select(.data.http.status=="success")' results.jsonl > business.jsonl
-jq 'select(.data.http.status=="application-error")' results.jsonl > filtered.jsonl
+# keep only direct business web applications
+jq 'select(.data.http.web_filter.category=="business")' results.jsonl > business.jsonl
+
+# count the label distribution
+jq -r .data.http.web_filter.category results.jsonl | sort | uniq -c
+
+# exclude CDN/WAF/proxy/default pages but keep panels and devices
+jq 'select(.data.http.web_filter.category as $c | $c=="business" or $c=="panel" or $c=="device")' results.jsonl
 ```
 
 Rule fields: `name`, `category`, `reason`, `status` (list of status codes),

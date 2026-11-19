@@ -111,98 +111,80 @@ func baseWebFilterFlags() *Flags {
 	return f
 }
 
+// requireLabel asserts the core label semantics: whatever the classification
+// verdict is, the scan status stays "success" — the web_filter block is pure
+// metadata, zgrab2 never drops targets.
+func requireLabel(t *testing.T, status zgrab2.ScanStatus, results *Results, matched bool, category webfilter.Category, rule string) {
+	t.Helper()
+	if status != zgrab2.SCAN_SUCCESS {
+		t.Fatalf("status = %s, want success (classification must never change the scan status)", status)
+	}
+	wf := results.WebFilter
+	if wf == nil {
+		t.Fatal("web_filter block missing")
+	}
+	if wf.Matched != matched {
+		t.Fatalf("matched = %v, want %v", wf.Matched, matched)
+	}
+	if wf.Category != category {
+		t.Fatalf("category = %s, want %s", wf.Category, category)
+	}
+	if matched && wf.Rule != rule {
+		t.Fatalf("rule = %s, want %s", wf.Rule, rule)
+	}
+}
+
 func TestWebFilterScanBusinessPage(t *testing.T) {
 	status, results := runWebFilterScan(t, baseWebFilterFlags(),
 		httpResp("200 OK", nil, "<html><head><title>某公司业务系统</title></head><body>登录</body></html>"))
-	if status != zgrab2.SCAN_SUCCESS {
-		t.Fatalf("status = %s, want success", status)
-	}
-	if results.WebFilter == nil || results.WebFilter.Filtered {
-		t.Fatalf("web_filter = %+v, want filtered=false", results.WebFilter)
-	}
+	requireLabel(t, status, results, false, webfilter.CategoryBusiness, "")
 }
 
-func TestWebFilterScanNginxDefaultDropped(t *testing.T) {
+func TestWebFilterScanNginxDefaultLabeled(t *testing.T) {
 	status, results := runWebFilterScan(t, baseWebFilterFlags(),
 		httpResp("200 OK", []string{"Server: nginx/1.24.0"},
 			"<html><head><title>Welcome to nginx!</title></head><body>If you see this page, the nginx web server is successfully installed.</body></html>"))
-	if status != zgrab2.SCAN_APPLICATION_ERROR {
-		t.Fatalf("status = %s, want application-error", status)
-	}
-	wf := results.WebFilter
-	if wf == nil || !wf.Filtered || wf.Category != webfilter.CategoryDefault || wf.Rule != "nginx_default" || !wf.Dropped {
-		t.Fatalf("web_filter = %+v, want default/nginx_default dropped", wf)
-	}
+	// still a successful scan: the default-page verdict is only a label
+	requireLabel(t, status, results, true, webfilter.CategoryDefault, "nginx_default")
 }
 
-func TestWebFilterScanWAFDropped(t *testing.T) {
+func TestWebFilterScanWAFLabeled(t *testing.T) {
 	status, results := runWebFilterScan(t, baseWebFilterFlags(),
 		httpResp("405 Not Allowed", nil,
 			"<html><body>您的请求可能对网站造成威胁，已被Web应用防火墙拦截 <a href='https://errors.aliyun.com'>errors.aliyun.com</a></body></html>"))
-	if status != zgrab2.SCAN_APPLICATION_ERROR {
-		t.Fatalf("status = %s, want application-error", status)
-	}
-	if wf := results.WebFilter; wf == nil || wf.Category != webfilter.CategoryWAF || wf.Rule != "aliyun_waf" {
-		t.Fatalf("web_filter = %+v, want waf/aliyun_waf", wf)
-	}
+	requireLabel(t, status, results, true, webfilter.CategoryWAF, "aliyun_waf")
 }
 
-func TestWebFilterScanProxy407Dropped(t *testing.T) {
+func TestWebFilterScanProxy407Labeled(t *testing.T) {
 	status, results := runWebFilterScan(t, baseWebFilterFlags(),
 		httpResp("407 Proxy Authentication Required", []string{"Proxy-Authenticate: Basic realm=\"proxy\""}, "auth pls"))
-	if status != zgrab2.SCAN_APPLICATION_ERROR {
-		t.Fatalf("status = %s, want application-error", status)
-	}
-	if wf := results.WebFilter; wf == nil || wf.Category != webfilter.CategoryProxy || wf.Rule != "http_407" {
-		t.Fatalf("web_filter = %+v, want proxy/http_407", wf)
-	}
+	requireLabel(t, status, results, true, webfilter.CategoryProxy, "http_407")
 }
 
-func TestWebFilterScanPanelKeptThenDropped(t *testing.T) {
-	resp := httpResp("200 OK", nil, "<html><head><title>宝塔Linux面板 - 安全入口</title></head><body>BT-Panel</body></html>")
-
-	// default drop set keeps panels as success
-	status, results := runWebFilterScan(t, baseWebFilterFlags(), resp)
-	if status != zgrab2.SCAN_SUCCESS {
-		t.Fatalf("status = %s, want success (panel kept by default)", status)
-	}
-	if wf := results.WebFilter; wf == nil || !wf.Filtered || wf.Category != webfilter.CategoryPanel || wf.Dropped {
-		t.Fatalf("web_filter = %+v, want panel filtered but kept", wf)
-	}
-
-	// --web-filter-drop panel turns it into an application error
-	flags := baseWebFilterFlags()
-	flags.WebFilterDrop = "proxy,cdn,waf,default,panel"
-	status, results = runWebFilterScan(t, flags, resp)
-	if status != zgrab2.SCAN_APPLICATION_ERROR {
-		t.Fatalf("status = %s, want application-error", status)
-	}
-	if wf := results.WebFilter; wf == nil || !wf.Dropped {
-		t.Fatalf("web_filter = %+v, want dropped", wf)
-	}
+func TestWebFilterScanPanelLabeled(t *testing.T) {
+	status, results := runWebFilterScan(t, baseWebFilterFlags(),
+		httpResp("200 OK", nil, "<html><head><title>宝塔Linux面板 - 安全入口</title></head><body>BT-Panel</body></html>"))
+	requireLabel(t, status, results, true, webfilter.CategoryPanel, "bt_panel")
 }
 
-func TestWebFilterScanTagOnlyStaysSuccess(t *testing.T) {
-	flags := baseWebFilterFlags()
-	flags.WebFilterTagOnly = true
-	status, results := runWebFilterScan(t, flags,
-		httpResp("200 OK", nil, "<html><head><title>Welcome to nginx!</title></head></html>"))
-	if status != zgrab2.SCAN_SUCCESS {
-		t.Fatalf("status = %s, want success in tag-only mode", status)
-	}
-	if wf := results.WebFilter; wf == nil || !wf.Dropped {
-		t.Fatalf("web_filter = %+v, want dropped=true tag", wf)
-	}
-}
-
-func TestWebFilterScanCloudflareCDN(t *testing.T) {
+func TestWebFilterScanCloudflareCDNLabeled(t *testing.T) {
 	status, results := runWebFilterScan(t, baseWebFilterFlags(),
 		httpResp("403 Forbidden", []string{"Server: cloudflare", "Cf-Ray: 8f3a2b1c0d9e0123-LAX"},
 			"<html><body>Attention Required! | Cloudflare<br>Ray ID: 8f3a2b1c0d9e0123</body></html>"))
-	if status != zgrab2.SCAN_APPLICATION_ERROR {
-		t.Fatalf("status = %s, want application-error", status)
+	requireLabel(t, status, results, true, webfilter.CategoryCDN, "cloudflare")
+}
+
+// TestWebFilterScanDisabledByDefault verifies that without --web-filter the
+// results carry no web_filter block at all.
+func TestWebFilterScanDisabledByDefault(t *testing.T) {
+	f := baseWebFilterFlags()
+	f.WebFilterEnable = false
+	status, results := runWebFilterScan(t, f,
+		httpResp("200 OK", nil, "<html><head><title>Welcome to nginx!</title></head></html>"))
+	if status != zgrab2.SCAN_SUCCESS {
+		t.Fatalf("status = %s, want success", status)
 	}
-	if wf := results.WebFilter; wf == nil || wf.Category != webfilter.CategoryCDN || wf.Rule != "cloudflare" {
-		t.Fatalf("web_filter = %+v, want cdn/cloudflare", wf)
+	if results.WebFilter != nil {
+		t.Fatalf("web_filter = %+v, want nil without --web-filter", results.WebFilter)
 	}
 }

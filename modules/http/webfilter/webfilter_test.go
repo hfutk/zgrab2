@@ -34,10 +34,9 @@ type classifyCase struct {
 	headers    map[string]string
 	body       string
 
-	wantFiltered bool
+	wantMatched  bool
 	wantCategory Category
 	wantRule     string
-	wantDropped  bool
 }
 
 func runClassifyCases(t *testing.T, cases []classifyCase) {
@@ -46,15 +45,16 @@ func runClassifyCases(t *testing.T, cases []classifyCase) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := mustFilter(t, tc.opts)
 			res := f.Classify(tc.statusCode, headers(tc.headers), tc.body)
-			if res.Filtered != tc.wantFiltered {
-				t.Fatalf("Filtered = %v, want %v (got %+v)", res.Filtered, tc.wantFiltered, res)
+			if res.Matched != tc.wantMatched {
+				t.Fatalf("Matched = %v, want %v (got %+v)", res.Matched, tc.wantMatched, res)
 			}
-			if !tc.wantFiltered {
-				return
-			}
-			if res.Category != tc.wantCategory || res.Rule != tc.wantRule || res.Dropped != tc.wantDropped {
-				t.Fatalf("got category=%s rule=%s dropped=%v, want category=%s rule=%s dropped=%v",
-					res.Category, res.Rule, res.Dropped, tc.wantCategory, tc.wantRule, tc.wantDropped)
+			if tc.wantMatched {
+				if res.Category != tc.wantCategory || res.Rule != tc.wantRule {
+					t.Fatalf("got category=%s rule=%s, want category=%s rule=%s",
+						res.Category, res.Rule, tc.wantCategory, tc.wantRule)
+				}
+			} else if res.Category != CategoryBusiness || res.Rule != "" {
+				t.Fatalf("unmatched response must be labeled business, got %+v", res)
 			}
 		})
 	}
@@ -63,129 +63,115 @@ func runClassifyCases(t *testing.T, cases []classifyCase) {
 func TestClassifyBuiltinRules(t *testing.T) {
 	runClassifyCases(t, []classifyCase{
 		{
-			name: "business page stays", statusCode: 200,
+			name: "business page gets business label", statusCode: 200,
 			headers: map[string]string{"server": "Apache"},
 			body:    "<html><head><title>某公司官方门户 - 登录</title></head><body>欢迎使用我们的业务系统</body></html>",
 		},
 		{
-			name: "empty 200 stays", statusCode: 200, body: "",
+			name: "empty 200 gets business label", statusCode: 200, body: "",
 		},
 		{
 			name: "407 proxy", statusCode: 407,
-			headers:      map[string]string{"proxy-authenticate": "Basic realm=\"proxy\""},
-			body:         "Proxy authentication required",
-			wantFiltered: true, wantCategory: CategoryProxy, wantRule: "http_407", wantDropped: true,
+			headers:     map[string]string{"proxy-authenticate": "Basic realm=\"proxy\""},
+			body:        "Proxy authentication required",
+			wantMatched: true, wantCategory: CategoryProxy, wantRule: "http_407",
 		},
 		{
 			name: "proxy auth header only", statusCode: 200,
-			headers:      map[string]string{"proxy-authenticate": "Basic realm=x"},
-			wantFiltered: true, wantCategory: CategoryProxy, wantRule: "proxy_auth_header", wantDropped: true,
+			headers:     map[string]string{"proxy-authenticate": "Basic realm=x"},
+			wantMatched: true, wantCategory: CategoryProxy, wantRule: "proxy_auth_header",
 		},
 		{
 			name: "squid page", statusCode: 403,
-			headers:      map[string]string{"server": "squid/3.5.20", "mime-version": "1.0"},
-			body:         "<title>ERROR: Cache Access Denied</title> While trying to retrieve the URL: cache access denied",
-			wantFiltered: true, wantCategory: CategoryProxy, wantRule: "squid_proxy", wantDropped: true,
+			headers:     map[string]string{"server": "squid/3.5.20", "mime-version": "1.0"},
+			body:        "<title>ERROR: Cache Access Denied</title> While trying to retrieve the URL: cache access denied",
+			wantMatched: true, wantCategory: CategoryProxy, wantRule: "squid_proxy",
 		},
 		{
 			name: "cloudflare headers", statusCode: 403,
-			headers:      map[string]string{"server": "cloudflare", "cf-ray": "8abc123"},
-			body:         "Attention Required! | Cloudflare",
-			wantFiltered: true, wantCategory: CategoryCDN, wantRule: "cloudflare", wantDropped: true,
+			headers:     map[string]string{"server": "cloudflare", "cf-ray": "8abc123"},
+			body:        "Attention Required! | Cloudflare",
+			wantMatched: true, wantCategory: CategoryCDN, wantRule: "cloudflare",
 		},
 		{
 			name: "cloudfront bad request", statusCode: 400,
-			headers:      map[string]string{"x-amz-cf-id": "abc", "x-cache": "Error from cloudfront"},
-			body:         "The request could not be satisfied.",
-			wantFiltered: true, wantCategory: CategoryCDN, wantRule: "cloudfront", wantDropped: true,
+			headers:     map[string]string{"x-amz-cf-id": "abc", "x-cache": "Error from cloudfront"},
+			body:        "The request could not be satisfied.",
+			wantMatched: true, wantCategory: CategoryCDN, wantRule: "cloudfront",
 		},
 		{
 			name: "cdn domain not configured", statusCode: 200,
-			body:         "<title>欢迎访问</title>欢迎使用腾讯云CDN，该域名尚未接入",
-			wantFiltered: true, wantCategory: CategoryCDN, wantRule: "cn_cdn", wantDropped: true,
+			body:        "<title>欢迎访问</title>欢迎使用腾讯云CDN，该域名尚未接入",
+			wantMatched: true, wantCategory: CategoryCDN, wantRule: "cn_cdn",
 		},
 		{
 			name: "aliyun waf", statusCode: 405,
-			body:         "<html><body>您的请求可能对网站造成威胁，已被Web应用防火墙拦截 errors.aliyun.com</body></html>",
-			wantFiltered: true, wantCategory: CategoryWAF, wantRule: "aliyun_waf", wantDropped: true,
+			body:        "<html><body>您的请求可能对网站造成威胁，已被Web应用防火墙拦截 errors.aliyun.com</body></html>",
+			wantMatched: true, wantCategory: CategoryWAF, wantRule: "aliyun_waf",
 		},
 		{
 			name: "generic waf block", statusCode: 403,
-			body:         "<title>请求被拦截</title><body>该请求疑似攻击行为，已触发安全防护</body>",
-			wantFiltered: true, wantCategory: CategoryWAF, wantRule: "generic_waf_block", wantDropped: true,
+			body:        "<title>请求被拦截</title><body>该请求疑似攻击行为，已触发安全防护</body>",
+			wantMatched: true, wantCategory: CategoryWAF, wantRule: "generic_waf_block",
 		},
 		{
 			name: "nginx default page", statusCode: 200,
-			body:         "<html><head><title>Welcome to nginx!</title></head><body>If you see this page, the nginx web server is successfully installed</body></html>",
-			wantFiltered: true, wantCategory: CategoryDefault, wantRule: "nginx_default", wantDropped: true,
+			body:        "<html><head><title>Welcome to nginx!</title></head><body>If you see this page, the nginx web server is successfully installed</body></html>",
+			wantMatched: true, wantCategory: CategoryDefault, wantRule: "nginx_default",
 		},
 		{
 			name: "index of directory listing", statusCode: 200,
-			body:         "<html><head><title>Index of /</title></head></html>",
-			wantFiltered: true, wantCategory: CategoryDefault, wantRule: "dir_index", wantDropped: true,
+			body:        "<html><head><title>Index of /</title></head></html>",
+			wantMatched: true, wantCategory: CategoryDefault, wantRule: "dir_index",
 		},
 		{
 			// waf rules run before device rules (same order as web_filter.py):
 			// F5 BIG-IP belongs to waf/f5_asm, not device/ssl_vpn.
 			name: "f5 block page goes to waf", statusCode: 403,
-			body:         "The requested URL was rejected. Please consult with your administrator. Your Support ID is: 12345",
-			wantFiltered: true, wantCategory: CategoryWAF, wantRule: "f5_asm", wantDropped: true,
+			body:        "The requested URL was rejected. Please consult with your administrator. Your Support ID is: 12345",
+			wantMatched: true, wantCategory: CategoryWAF, wantRule: "f5_asm",
 		},
 	})
 }
 
-func TestPanelAndDeviceKeptByDefault(t *testing.T) {
+func TestPanelAndDeviceLabeled(t *testing.T) {
 	runClassifyCases(t, []classifyCase{
 		{
-			name: "bt panel kept by default", statusCode: 200,
-			body:         "<title>宝塔Linux面板 - 登录</title>BT-Panel",
-			wantFiltered: true, wantCategory: CategoryPanel, wantRule: "bt_panel", wantDropped: false,
+			name: "bt panel labeled", statusCode: 200,
+			body:        "<title>宝塔Linux面板 - 登录</title>BT-Panel",
+			wantMatched: true, wantCategory: CategoryPanel, wantRule: "bt_panel",
 		},
 		{
-			name: "phpmyadmin kept by default", statusCode: 200,
-			body:         "<title>phpMyAdmin</title>",
-			wantFiltered: true, wantCategory: CategoryPanel, wantRule: "db_admin_panel", wantDropped: false,
+			name: "phpmyadmin labeled", statusCode: 200,
+			body:        "<title>phpMyAdmin</title>",
+			wantMatched: true, wantCategory: CategoryPanel, wantRule: "db_admin_panel",
 		},
 		{
-			name: "ssl vpn kept by default", statusCode: 200,
-			body:         "<title>SSL VPN</title>EasyConnect",
-			wantFiltered: true, wantCategory: CategoryDevice, wantRule: "ssl_vpn", wantDropped: false,
+			name: "ssl vpn labeled", statusCode: 200,
+			body:        "<title>SSL VPN</title>EasyConnect",
+			wantMatched: true, wantCategory: CategoryDevice, wantRule: "ssl_vpn",
 		},
 		{
-			name: "hikvision camera kept by default", statusCode: 200,
-			body:         "Hikvision Digital Technology 网络摄像机",
-			wantFiltered: true, wantCategory: CategoryDevice, wantRule: "camera_dvr", wantDropped: false,
+			name: "hikvision camera labeled", statusCode: 200,
+			body:        "Hikvision Digital Technology 网络摄像机",
+			wantMatched: true, wantCategory: CategoryDevice, wantRule: "camera_dvr",
 		},
 	})
 }
 
-func TestDropAndKeepOverrides(t *testing.T) {
-	runClassifyCases(t, []classifyCase{
-		{
-			name:         "panel dropped when listed",
-			opts:         &Options{DropCategories: []string{"proxy", "cdn", "waf", "default", "panel"}},
-			body:         "<title>宝塔Linux面板</title>",
-			wantFiltered: true, wantCategory: CategoryPanel, wantRule: "bt_panel", wantDropped: true,
-		},
-		{
-			name:         "device dropped when listed",
-			opts:         &Options{DropCategories: []string{"device"}},
-			body:         "<title>SSL VPN</title>",
-			wantFiltered: true, wantCategory: CategoryDevice, wantRule: "ssl_vpn", wantDropped: true,
-		},
-		{
-			name:         "keep overrides drop",
-			opts:         &Options{DropCategories: []string{"proxy", "cdn", "waf", "default"}, KeepCategories: []string{"default"}},
-			body:         "<title>Welcome to nginx!</title>",
-			wantFiltered: true, wantCategory: CategoryDefault, wantRule: "nginx_default", wantDropped: false,
-		},
-		{
-			name:         "empty drop list keeps everything",
-			opts:         &Options{DropCategories: []string{}},
-			body:         "Your request was blocked errors.aliyun.com",
-			wantFiltered: true, wantCategory: CategoryWAF, wantRule: "aliyun_waf", wantDropped: false,
-		},
-	})
+// TestUnmatchedIsBusiness verifies the core label semantics: responses that
+// hit no fingerprint rule are labeled "business" (presumed direct business
+// web application), and every category is just a label — nothing is dropped.
+func TestUnmatchedIsBusiness(t *testing.T) {
+	f := mustFilter(t, nil)
+	for _, body := range []string{
+		"<title>公司门户</title>业务系统首页",
+		"random api gateway payload",
+	} {
+		if res := f.Classify(200, headers(nil), body); res.Matched || res.Category != CategoryBusiness {
+			t.Fatalf("unmatched body labeled %+v, want business", res)
+		}
+	}
 }
 
 func TestCustomRulesFile(t *testing.T) {
@@ -207,7 +193,7 @@ func TestCustomRulesFile(t *testing.T) {
 	for name, path := range map[string]string{"bare array": barePath, "wrapped object": wrappedPath} {
 		f := mustFilter(t, &Options{RulesFiles: []string{path}})
 		res := f.Classify(200, headers(nil), "please sign in via sso.example-corp.internal to continue")
-		if !res.Filtered || res.Rule != "my_login_gate" || res.Category != CategoryPanel {
+		if !res.Matched || res.Rule != "my_login_gate" || res.Category != CategoryPanel {
 			t.Fatalf("%s: got %+v", name, res)
 		}
 	}
@@ -224,9 +210,10 @@ func TestCustomRulesFile(t *testing.T) {
 	}
 
 	// no-builtin: only custom rules run. The custom rule needs status=200
-	// and/or the sso body, so a 404 nginx-looking response matches nothing.
+	// and/or the sso body, so a 404 nginx-looking response matches nothing
+	// and is labeled business.
 	f = mustFilter(t, &Options{RulesFiles: []string{barePath}, NoBuiltinRules: true})
-	if res := f.Classify(404, headers(nil), "<title>Welcome to nginx!</title>"); res.Filtered {
+	if res := f.Classify(404, headers(nil), "<title>Welcome to nginx!</title>"); res.Matched || res.Category != CategoryBusiness {
 		t.Fatalf("builtin rules should be disabled, got %+v", res)
 	}
 }
@@ -240,13 +227,13 @@ func TestMatchAllSemantics(t *testing.T) {
 		Body:     []string{"blocked"},
 		Match:    "all",
 	}})})
-	if res := f.Classify(403, headers(nil), "you are blocked"); !res.Filtered {
+	if res := f.Classify(403, headers(nil), "you are blocked"); !res.Matched {
 		t.Fatalf("status+body both hit should match: %+v", res)
 	}
-	if res := f.Classify(403, headers(nil), "hello world"); res.Filtered {
+	if res := f.Classify(403, headers(nil), "hello world"); res.Matched {
 		t.Fatalf("body missing should not match with match=all: %+v", res)
 	}
-	if res := f.Classify(200, headers(nil), "you are blocked"); res.Filtered {
+	if res := f.Classify(200, headers(nil), "you are blocked"); res.Matched {
 		t.Fatalf("status missing should not match with match=all: %+v", res)
 	}
 }
@@ -283,7 +270,7 @@ func TestNormalizeBodyGBK(t *testing.T) {
 
 	f := mustFilter(t, nil)
 	res := f.Classify(405, headers(nil), raw)
-	if !res.Filtered || res.Rule != "aliyun_waf" {
+	if !res.Matched || res.Rule != "aliyun_waf" {
 		t.Fatalf("GBK-encoded WAF page not matched: %+v", res)
 	}
 }
@@ -324,7 +311,7 @@ func TestRulesDumpRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	f2 := mustFilter(t, &Options{RulesFiles: []string{path}, NoBuiltinRules: true})
-	if res := f2.Classify(200, headers(nil), "<title>Welcome to nginx!</title>"); !res.Filtered || res.Rule != "nginx_default" {
+	if res := f2.Classify(200, headers(nil), "<title>Welcome to nginx!</title>"); !res.Matched || res.Rule != "nginx_default" {
 		t.Fatalf("dumped rules lost fidelity: %+v", res)
 	}
 }
