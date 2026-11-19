@@ -110,6 +110,83 @@ This will display the module-specific options, as well as the application-wide o
 
 Module specific options must be included after the module. Application specific options can be specified at any time.
 
+### RDP module
+
+The `rdp` module (port 3389) identifies Remote Desktop services. It performs the
+X.224 (TPKT/COTP) Connection Request / Confirm exchange to detect any RDP
+implementation (Microsoft, xrdp, FreeRDP, ...), reports the negotiated
+security protocol (`standard_rdp`, `ssl`, `hybrid`, `ssl+hybrid`, `rdstls`,
+`hybrid_ex`, or a `hybrid_required_by_server`-style failure code), upgrades to
+TLS when the server selects a TLS-based protocol to capture the certificate,
+and fingerprints CredSSP (NLA) servers via NTLM (OS version, NetBIOS/DNS
+computer and domain names).
+
+```shell
+echo 192.0.2.1 | ./zgrab2 rdp
+echo 192.0.2.1 | ./zgrab2 rdp -p 33890
+```
+
+### Web Filter (http module)
+
+The HTTP module ships an optional response-fingerprint filter, ported from the
+standalone `web_filter.py` tool. When enabled, each response is classified and
+non-business pages in the active drop set are reported as `application-error`
+(keeping the full result plus a `web_filter` verdict), so direct business web
+applications can be selected by status:
+
+| Category | Contents | Dropped by default |
+|----------|----------|--------------------|
+| `proxy`  | 407 / Proxy-Authenticate / Squid / Tinyproxy pages | yes |
+| `cdn`    | Cloudflare / CloudFront / Fastly / Akamai / CN CDN / "domain not configured" pages | yes |
+| `waf`    | Aliyun / Tencent / Safedog / Safeline / Incapsula / F5 ... block & challenge pages | yes |
+| `default`| nginx / Apache / IIS / Tomcat / OpenResty default pages, "Index of /" | yes |
+| `panel`  | BT-Panel / phpMyAdmin / bastion hosts / iDRAC / IPMI panels | no (`--web-filter-drop panel` to enable) |
+| `device` | SSL VPN / router / camera / printer / Wi-Fi portal UIs | no (`--web-filter-drop device` to enable) |
+
+```shell
+# Drop proxy/cdn/waf/default pages; keep everything else
+zgrab2 http -p 80,443,8080 --web-filter < targets.txt
+
+# Also drop admin panels and device UIs
+zgrab2 http --web-filter --web-filter-drop=proxy,cdn,waf,default,panel,device < targets.txt
+
+# Only annotate results (web_filter block) without changing the scan status
+zgrab2 http --web-filter --web-filter-tag-only < targets.txt
+
+# Keep default pages even though they are in the default drop set
+zgrab2 http --web-filter --web-filter-keep=default < targets.txt
+
+# Dump the active fingerprint rules as JSON (43 built-in rules)
+zgrab2 http --web-filter-dump-rules
+
+# Append custom rules (same schema as the dump output; files written for
+# web_filter.py work as-is); built-ins can be disabled with
+# --web-filter-no-builtin-rules
+zgrab2 http --web-filter --web-filter-rules=extra_rules.json
+```
+
+Results contain a `web_filter` object, and dropped categories are returned
+with status `application-error` (unless `--web-filter-tag-only` is set):
+
+```json
+"web_filter": {"filtered": true, "category": "waf", "rule": "aliyun_waf",
+               "reason": "阿里云WAF/云盾拦截页", "dropped": true}
+```
+
+Split business applications from dropped targets with `jq`:
+
+```shell
+jq 'select(.data.http.status=="success")' results.jsonl > business.jsonl
+jq 'select(.data.http.status=="application-error")' results.jsonl > filtered.jsonl
+```
+
+Rule fields: `name`, `category`, `reason`, `status` (list of status codes),
+`headers` (name -> regex, `"*"` = header presence), `title` (regexes matched
+against the normalized `<title>`), `body` (regexes matched against the
+charset-decoded body; GBK pages are decoded automatically), and `match`
+(`"any"` default / `"all"`). Rules are evaluated in order, first match wins.
+
+
 ## Input Format
 
 Targets are specified with input files or from `stdin`, in CSV format.  Each input line has up to four fields:
