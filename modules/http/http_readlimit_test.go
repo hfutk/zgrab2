@@ -391,7 +391,7 @@ func getResponse(result any) *http.Response {
 // Run a single test with the given configuration.
 func (cfg *readLimitTestConfig) runTest(t *testing.T) {
 	// The read limit is a package-level global; restore it after each test so
-	// unrelated tests in this package (e.g. the web filter tests) are not
+	// unrelated tests in this package (e.g. the web classification tests) are not
 	// affected by whatever value the last read-limit config happened to set.
 	prevReadLimit := zgrab2.DefaultBytesReadLimit
 	defer func() { zgrab2.DefaultBytesReadLimit = prevReadLimit }()

@@ -126,18 +126,25 @@ echo 192.0.2.1 | ./zgrab2 rdp
 echo 192.0.2.1 | ./zgrab2 rdp -p 33890
 ```
 
-### Web Filter (http module)
+### Web Service Classification (http module)
 
 The HTTP module ships an optional response-fingerprint classifier, ported from
-the standalone `web_filter.py` tool. When enabled with `--web-filter`, every
-response gets a `web_filter` label naming what kind of page it is. zgrab2 has
-no concept of dropping targets: classification is pure metadata, the scan
-status is never changed — select the labels you want downstream (see the `jq`
-examples below).
+the standalone `web_filter.py` tool. When enabled with `--classify-web`, every
+identified HTTP service gets a `classification` label that tells real,
+directly-reachable business web applications apart from proxies, CDN edge
+pages, WAF blocks, middleware default pages, admin panels and device UIs.
+
+zgrab2 has no concept of dropping targets: classification is pure metadata,
+the scan status is never changed — select the labels you want downstream (see
+the `jq` examples below). Classification runs in-process on the response the
+scan already fetched, so enabling it never opens an additional connection or
+sends an extra request (redirects and HTTPS retries only happen if you
+explicitly ask for them via `--max-redirects` / `--retry-https` /
+`--fail-http-to-https`).
 
 | Category | Meaning |
 |----------|---------|
-| `business` | no fingerprint matched — presumed direct business web application |
+| `business` | no fingerprint matched — presumed direct, directly-reachable business web application |
 | `proxy`  | auth-required / open HTTP proxies: 407, Proxy-Authenticate, Squid / Tinyproxy pages |
 | `cdn`    | Cloudflare / CloudFront / Fastly / Akamai / CN CDN / "domain not configured" edge pages |
 | `waf`    | Aliyun / Tencent / Safedog / Safeline / Incapsula / F5 ... block & challenge pages |
@@ -146,37 +153,37 @@ examples below).
 | `device` | SSL VPN / router / camera / printer / Wi-Fi portal UIs |
 
 ```shell
-# Label every response (43 built-in fingerprint rules)
-zgrab2 http -p 80,443,8080 --web-filter < targets.txt
+# Label every identified http service (43 built-in fingerprint rules)
+zgrab2 http -p 80,443,8080 --classify-web < targets.txt
 
 # Dump the active fingerprint rules as JSON
-zgrab2 http --web-filter-dump-rules
+zgrab2 http --classify-web-dump-rules
 
 # Append custom rules (same schema as the dump output; files written for
 # web_filter.py work as-is); built-ins can be disabled with
-# --web-filter-no-builtin-rules
-zgrab2 http --web-filter --web-filter-rules=extra_rules.json
+# --classify-web-no-builtin
+zgrab2 http --classify-web --classify-web-rules=extra_rules.json
 ```
 
-Successful responses carry a `web_filter` object (the verdict never changes
-the scan status):
+Successful responses carry a `classification` object (the verdict never
+changes the scan status):
 
 ```json
-"web_filter": {"matched": true, "category": "waf", "rule": "aliyun_waf",
-               "reason": "阿里云WAF/云盾拦截页"}
+"classification": {"matched": true, "category": "waf", "rule": "aliyun_waf",
+                   "reason": "阿里云WAF/云盾拦截页"}
 ```
 
-Split business applications from non-business pages by label with `jq`:
+Split real business applications from non-business pages by label with `jq`:
 
 ```shell
-# keep only direct business web applications
-jq 'select(.data.http.web_filter.category=="business")' results.jsonl > business.jsonl
+# keep only direct, directly-reachable business web applications
+jq 'select(.data.http.classification.category=="business")' results.jsonl > business.jsonl
 
 # count the label distribution
-jq -r .data.http.web_filter.category results.jsonl | sort | uniq -c
+jq -r .data.http.classification.category results.jsonl | sort | uniq -c
 
 # exclude CDN/WAF/proxy/default pages but keep panels and devices
-jq 'select(.data.http.web_filter.category as $c | $c=="business" or $c=="panel" or $c=="device")' results.jsonl
+jq 'select(.data.http.classification.category as $c | $c=="business" or $c=="panel" or $c=="device")' results.jsonl
 ```
 
 Rule fields: `name`, `category`, `reason`, `status` (list of status codes),

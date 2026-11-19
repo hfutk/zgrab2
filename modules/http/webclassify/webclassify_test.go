@@ -1,4 +1,4 @@
-package webfilter
+package webclassify
 
 import (
 	"encoding/json"
@@ -18,7 +18,7 @@ func headers(h map[string]string) GetHeaderFunc {
 	}
 }
 
-func mustFilter(t *testing.T, opts *Options) *Filter {
+func mustClassifier(t *testing.T, opts *Options) *Classifier {
 	t.Helper()
 	f, err := New(opts)
 	if err != nil {
@@ -43,7 +43,7 @@ func runClassifyCases(t *testing.T, cases []classifyCase) {
 	t.Helper()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := mustFilter(t, tc.opts)
+			f := mustClassifier(t, tc.opts)
 			res := f.Classify(tc.statusCode, headers(tc.headers), tc.body)
 			if res.Matched != tc.wantMatched {
 				t.Fatalf("Matched = %v, want %v (got %+v)", res.Matched, tc.wantMatched, res)
@@ -163,7 +163,7 @@ func TestPanelAndDeviceLabeled(t *testing.T) {
 // hit no fingerprint rule are labeled "business" (presumed direct business
 // web application), and every category is just a label — nothing is dropped.
 func TestUnmatchedIsBusiness(t *testing.T) {
-	f := mustFilter(t, nil)
+	f := mustClassifier(t, nil)
 	for _, body := range []string{
 		"<title>公司门户</title>业务系统首页",
 		"random api gateway payload",
@@ -191,7 +191,7 @@ func TestCustomRulesFile(t *testing.T) {
 	}
 
 	for name, path := range map[string]string{"bare array": barePath, "wrapped object": wrappedPath} {
-		f := mustFilter(t, &Options{RulesFiles: []string{path}})
+		f := mustClassifier(t, &Options{RulesFiles: []string{path}})
 		res := f.Classify(200, headers(nil), "please sign in via sso.example-corp.internal to continue")
 		if !res.Matched || res.Rule != "my_login_gate" || res.Category != CategoryPanel {
 			t.Fatalf("%s: got %+v", name, res)
@@ -199,7 +199,7 @@ func TestCustomRulesFile(t *testing.T) {
 	}
 
 	// builtin + custom: custom rules run after the builtin set
-	f := mustFilter(t, &Options{RulesFiles: []string{barePath}})
+	f := mustClassifier(t, &Options{RulesFiles: []string{barePath}})
 	if res := f.Classify(200, headers(nil), "<title>Welcome to nginx!</title>"); res.Rule != "nginx_default" {
 		t.Fatalf("builtin rules should still run first, got %+v", res)
 	}
@@ -212,14 +212,14 @@ func TestCustomRulesFile(t *testing.T) {
 	// no-builtin: only custom rules run. The custom rule needs status=200
 	// and/or the sso body, so a 404 nginx-looking response matches nothing
 	// and is labeled business.
-	f = mustFilter(t, &Options{RulesFiles: []string{barePath}, NoBuiltinRules: true})
+	f = mustClassifier(t, &Options{RulesFiles: []string{barePath}, NoBuiltinRules: true})
 	if res := f.Classify(404, headers(nil), "<title>Welcome to nginx!</title>"); res.Matched || res.Category != CategoryBusiness {
 		t.Fatalf("builtin rules should be disabled, got %+v", res)
 	}
 }
 
 func TestMatchAllSemantics(t *testing.T) {
-	f := mustFilter(t, &Options{NoBuiltinRules: true, RulesFiles: mustWriteRules(t, []Rule{{
+	f := mustClassifier(t, &Options{NoBuiltinRules: true, RulesFiles: mustWriteRules(t, []Rule{{
 		Name:     "both_required",
 		Category: CategoryWAF,
 		Reason:   "status and body together",
@@ -268,7 +268,7 @@ func TestNormalizeBodyGBK(t *testing.T) {
 		t.Fatalf("UTF-8 body should pass through unchanged")
 	}
 
-	f := mustFilter(t, nil)
+	f := mustClassifier(t, nil)
 	res := f.Classify(405, headers(nil), raw)
 	if !res.Matched || res.Rule != "aliyun_waf" {
 		t.Fatalf("GBK-encoded WAF page not matched: %+v", res)
@@ -292,7 +292,7 @@ func TestExtractTitle(t *testing.T) {
 }
 
 func TestRulesDumpRoundTrip(t *testing.T) {
-	f := mustFilter(t, nil)
+	f := mustClassifier(t, nil)
 	rules := f.Rules()
 	if len(rules) != 43 {
 		t.Fatalf("expected 43 builtin rules (same as web_filter.py), got %d", len(rules))
@@ -310,7 +310,7 @@ func TestRulesDumpRoundTrip(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f2 := mustFilter(t, &Options{RulesFiles: []string{path}, NoBuiltinRules: true})
+	f2 := mustClassifier(t, &Options{RulesFiles: []string{path}, NoBuiltinRules: true})
 	if res := f2.Classify(200, headers(nil), "<title>Welcome to nginx!</title>"); !res.Matched || res.Rule != "nginx_default" {
 		t.Fatalf("dumped rules lost fidelity: %+v", res)
 	}
