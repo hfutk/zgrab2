@@ -1,6 +1,9 @@
 package rdp
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/zmap/zgrab2"
 	"github.com/zmap/zgrab2/lib/ntlm"
 )
@@ -37,6 +40,26 @@ var selectedProtocolNames = map[uint32]string{
 	protocolHybrid:   "hybrid",
 	protocolRDSTLS:   "rdstls",
 	protocolHybridEx: "hybrid_ex",
+}
+
+// selectedProtocolName decodes the NEG_RSP selectedProtocol bitmask into a
+// human-readable name. Servers commonly answer with combined masks (e.g.
+// SSL|HYBRID = 0x03, "TLS + CredSSP/NLA", the default on modern Windows), so
+// this must be treated as a bitmask, not a single enum value.
+func selectedProtocolName(p uint32) string {
+	if p == protocolRDP {
+		return selectedProtocolNames[protocolRDP]
+	}
+	var names []string
+	for _, bit := range []uint32{protocolSSL, protocolHybrid, protocolRDSTLS, protocolHybridEx} {
+		if p&bit != 0 {
+			names = append(names, selectedProtocolNames[bit])
+		}
+	}
+	if len(names) == 0 {
+		return fmt.Sprintf("unknown(0x%x)", p)
+	}
+	return strings.Join(names, "+")
 }
 
 var failureCodeNames = map[uint32]string{

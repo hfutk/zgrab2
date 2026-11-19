@@ -93,14 +93,16 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 		return zgrab2.SCAN_SUCCESS, result, nil
 	}
 
-	if name, ok := selectedProtocolNames[selectedProtocol]; ok {
+	if name := selectedProtocolName(selectedProtocol); name != "" {
 		result.SelectedProtocol = name
 	} else {
 		result.SelectedProtocol = fmt.Sprintf("unknown(0x%x)", selectedProtocol)
 	}
 
 	// --- Step 2: Conditional TLS upgrade ---
-	needTLS := selectedProtocol == protocolSSL || selectedProtocol == protocolHybrid || selectedProtocol == protocolHybridEx
+	// selectedProtocol is a bitmask; e.g. SSL|HYBRID (0x03) means the
+	// server wants TLS with CredSSP (NLA) inside it.
+	needTLS := selectedProtocol&(protocolSSL|protocolHybrid|protocolHybridEx) != 0
 	if needTLS {
 		tlsWrapper := dialGroup.TLSWrapper
 		if tlsWrapper == nil {
@@ -115,7 +117,7 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 	}
 
 	// --- Step 3: Conditional NTLM fingerprinting (CredSSP servers only) ---
-	if selectedProtocol == protocolHybrid || selectedProtocol == protocolHybridEx {
+	if selectedProtocol&(protocolHybrid|protocolHybridEx) != 0 {
 		ntlmStatus, ntlmErr := ntlmFingerprint(conn, result)
 		if ntlmErr != nil {
 			return ntlmStatus, result, ntlmErr
