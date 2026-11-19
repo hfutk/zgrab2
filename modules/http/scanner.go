@@ -14,11 +14,13 @@ import (
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +34,7 @@ import (
 	"github.com/zmap/zgrab2"
 	"github.com/zmap/zgrab2/lib/http"
 	"github.com/zmap/zgrab2/lib/http2"
+	"github.com/zmap/zgrab2/modules/http/webfilter"
 )
 
 var (
@@ -91,6 +94,18 @@ type Flags struct {
 
 	NoHTTP11 bool `long:"no-http1.1" description:"Use HTTP/2 with the initial request. If this connection is over TLS, we'll advertise HTTP/2 in ALPN. If not over TLS, we'll send an HTTP/2 over clear-text (h2c) request, sometimes known as http2 prior knowledge. Setting TLS.NextProtos will take precedence over this flag. Mutually exclusive with --no-http2"`
 	NoHTTP2  bool `long:"no-http2" description:"Use HTTP/1.1 with the initial request. If this connection is over TLS, we'll advertise HTTP/1.1 in ALPN. If not over TLS, we'll use a plain-text HTTP/1.1 request. Setting TLS.NextProtos will take precedence over this flag. Mutually exclusive with --no-http1.1"`
+
+	// Web Filter options (--web-filter*): fingerprint responses and separate
+	// direct business web applications from proxies, CDN edge pages, WAF block
+	// pages, middleware default pages, admin panels and device/VPN UIs.
+	// Ported from the standalone web_filter.py tool; rule files are shared.
+	WebFilterEnable    bool   `group:"Web Filter Options" long:"web-filter" description:"Classify responses with web-app fingerprint rules: matched drop categories (see --web-filter-drop) are reported as application-error with a web_filter block in the result"`
+	WebFilterDrop      string `group:"Web Filter Options" long:"web-filter-drop" default:"proxy,cdn,waf,default" description:"Comma-separated categories to drop (marked application-error): proxy,cdn,waf,default,panel,device or any custom rule category. panel and device are kept by default"`
+	WebFilterKeep      string `group:"Web Filter Options" long:"web-filter-keep" description:"Comma-separated categories always kept as success, even if listed in --web-filter-drop (e.g. --web-filter-keep=default)"`
+	WebFilterRules     string `group:"Web Filter Options" long:"web-filter-rules" description:"Comma-separated JSON files with extra fingerprint rules appended after the builtin rules (schema: see --web-filter-dump-rules output; files from web_filter.py work as-is)"`
+	WebFilterNoBuiltin bool   `group:"Web Filter Options" long:"web-filter-no-builtin-rules" description:"Disable the builtin fingerprint rules (use only --web-filter-rules files)"`
+	WebFilterTagOnly   bool   `group:"Web Filter Options" long:"web-filter-tag-only" description:"Only annotate results with the web_filter block; never change the scan status (dropped pages remain success)"`
+	WebFilterDumpRules bool   `group:"Web Filter Options" long:"web-filter-dump-rules" description:"Print the active web filter rules as JSON and exit"`
 }
 
 // A Results object is returned by the HTTP module's Scanner.Scan()
@@ -103,6 +118,11 @@ type Results struct {
 	// It contains all redirect response prior to the final response.
 	RedirectResponseChain []*http.Response `json:"redirect_response_chain,omitempty"`
 	NamesToIPs            []RedirectToIP   `json:"redirects_to_resolved_ips,omitempty"`
+
+	// WebFilter is populated when --web-filter is enabled: it reports the
+	// fingerprint classification of the final response (category, matching
+	// rule, and whether the category is dropped).
+	WebFilter *webfilter.Result `json:"web_filter,omitempty"`
 }
 
 type RedirectToIP struct {
@@ -124,6 +144,7 @@ type Scanner struct {
 	config        *Flags
 	customHeaders map[string]string
 	decodedHashFn func([]byte) string
+	webFilter     *webfilter.Filter
 }
 
 // scan holds the state for a single scan. This may entail multiple connections.
@@ -157,6 +178,11 @@ func (flags Flags) Help() string {
 		" - HTTP/2-only over plain-text                 --no-http1.1 - Sends the HTTP/2 connection preface over plain-text TCP, like curl's --http2-prior-knowledge flag",
 		" - HTTP/1.1-only over TLS                      --no-http2 --use-https - Will only advertise http/1.1 support in ALPN header",
 		" - HTTP/2-only over TLS                        --no-http1.1 --use-https - Use --use-https to connect with TLS instead. Using --use-https --no-http1.1 will only advertise HTTP/2 support ",
+		"Web Filter - separate business web apps from proxies / CDN pages / WAF blocks / default pages / panels / device UIs:",
+		" - Enable, dropping proxy,cdn,waf,default      --web-filter",
+		" - Also drop admin panels and device UIs       --web-filter --web-filter-drop=proxy,cdn,waf,default,panel,device",
+		" - Only annotate, never fail the scan          --web-filter --web-filter-tag-only",
+		" - Dump the fingerprint rules as JSON          --web-filter-dump-rules",
 	}
 	return strings.Join(lines, "\n")
 }
@@ -247,6 +273,37 @@ func (scanner *Scanner) Init(flags zgrab2.ScanFlags) error {
 		}
 	} else if fl.ComputeDecodedBodyHashAlgorithm != "" {
 		log.Panicf("Invalid ComputeDecodedBodyHashAlgorithm choice made it through zflags: %s", scanner.config.ComputeDecodedBodyHashAlgorithm)
+	}
+
+	// Web filter (--web-filter*): classify responses as business web apps
+	// vs. proxies / CDN pages / WAF blocks / default pages / panels / device
+	// UIs. --web-filter-dump-rules also works without --web-filter itself.
+	if fl.WebFilterEnable || fl.WebFilterDumpRules {
+		opts := &webfilter.Options{
+			KeepCategories: webfilter.SplitList(fl.WebFilterKeep),
+			RulesFiles:     webfilter.SplitList(fl.WebFilterRules),
+			NoBuiltinRules: fl.WebFilterNoBuiltin,
+		}
+		if fl.WebFilterDrop != "" {
+			opts.DropCategories = webfilter.SplitList(fl.WebFilterDrop)
+		}
+		filter, err := webfilter.New(opts)
+		if err != nil {
+			return fmt.Errorf("could not initialize web filter: %w", err)
+		}
+		scanner.webFilter = filter
+		if fl.WebFilterDumpRules {
+			// Same behavior as web_filter.py --dump-rules: print the
+			// active rules (which can be edited and re-fed via
+			// --web-filter-rules) and exit.
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetEscapeHTML(false)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(filter.Rules()); err != nil {
+				return fmt.Errorf("could not dump web filter rules: %w", err)
+			}
+			os.Exit(0)
+		}
 	}
 
 	scanner.SetBaseFlags(&scanner.config.BaseFlags)
@@ -593,6 +650,20 @@ func (scan *scan) Grab() *zgrab2.ScanError {
 		scan.results.Response.BodyTextLength = int64(len(scan.results.Response.BodyText))
 	}
 
+	// Classify the response against the web-filter rule set while the
+	// body is still plaintext (before the base64-encoding below), so
+	// rules always see the charset-decoded text.
+	if scan.scanner.webFilter != nil && scan.results.Response != nil {
+		resp := scan.results.Response
+		getHeader := func(name string) (string, bool) {
+			if vals, ok := resp.Header[http.CanonicalHeaderKey(name)]; ok && len(vals) > 0 {
+				return strings.Join(vals, ", "), true
+			}
+			return "", false
+		}
+		scan.results.WebFilter = scan.scanner.webFilter.Classify(resp.StatusCode, getHeader, resp.BodyText)
+	}
+
 	if len(scan.results.Response.BodyText) > 0 {
 		if scan.scanner.decodedHashFn != nil {
 			scan.results.Response.BodyHash = scan.scanner.decodedHashFn([]byte(scan.results.Response.BodyText))
@@ -655,7 +726,7 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 			if retryError != nil {
 				return err.Unpack(&scan.results)
 			}
-			return zgrab2.SCAN_SUCCESS, &retry.results, nil
+			return scanner.webFilterVerdict(&retry.results)
 		}
 		return err.Unpack(&scan.results)
 	}
@@ -669,5 +740,21 @@ func (scanner *Scanner) Scan(ctx context.Context, dialGroup *zgrab2.DialerGroup,
 			})
 		}
 	}
-	return zgrab2.SCAN_SUCCESS, &scan.results, nil
+	return scanner.webFilterVerdict(&scan.results)
+}
+
+// webFilterVerdict applies the final web-filter decision to a successful
+// grab: unless --web-filter-tag-only is set, responses classified into a
+// drop category are returned as application errors (keeping the full result
+// and the web_filter block) so business web applications can be selected
+// with e.g. `jq 'select(.data.http.status=="success")'`.
+func (scanner *Scanner) webFilterVerdict(results *Results) (zgrab2.ScanStatus, any, error) {
+	if results == nil || results.WebFilter == nil {
+		return zgrab2.SCAN_SUCCESS, results, nil
+	}
+	if wf := results.WebFilter; wf.Dropped && !scanner.config.WebFilterTagOnly {
+		return zgrab2.SCAN_APPLICATION_ERROR, results,
+			fmt.Errorf("web filter: dropped [%s/%s] %s", wf.Category, wf.Rule, wf.Reason)
+	}
+	return zgrab2.SCAN_SUCCESS, results, nil
 }
