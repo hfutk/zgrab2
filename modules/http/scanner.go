@@ -185,7 +185,7 @@ func (flags Flags) Help() string {
 		"Web Classification - label identified http services: real directly-reachable business app vs. proxy / cdn / waf / default / panel / device (never changes the scan status):",
 		" - Enable classification                           --classify-web",
 		" - Single connection: labels come from the response the scan already fetched",
-		" - Select business apps afterwards with jq        ... | jq 'select(.data.http.classification.category==\"business\")'",
+		" - Select business apps afterwards with jq        ... | jq 'select(.data.http.result.classification.category==\"business\")'",
 		" - Dump the fingerprint rules as JSON             --classify-web-dump-rules",
 	}
 	return strings.Join(lines, "\n")

@@ -177,13 +177,13 @@ Split real business applications from non-business pages by label with `jq`:
 
 ```shell
 # keep only direct, directly-reachable business web applications
-jq 'select(.data.http.classification.category=="business")' results.jsonl > business.jsonl
+jq 'select(.data.http.result.classification.category=="business")' results.jsonl > business.jsonl
 
 # count the label distribution
-jq -r .data.http.classification.category results.jsonl | sort | uniq -c
+jq -r .data.http.result.classification.category results.jsonl | sort | uniq -c
 
 # exclude CDN/WAF/proxy/default pages but keep panels and devices
-jq 'select(.data.http.classification.category as $c | $c=="business" or $c=="panel" or $c=="device")' results.jsonl
+jq 'select(.data.http.result.classification.category as $c | $c=="business" or $c=="panel" or $c=="device")' results.jsonl
 ```
 
 Rule fields: `name`, `category`, `reason`, `status` (list of status codes),

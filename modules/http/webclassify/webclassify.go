@@ -16,7 +16,7 @@
 // of dropping targets, so the verdict never changes the scan status — pick
 // the labels you want downstream, e.g.
 //
-//	jq 'select(.data.http.classification.category=="business")'.
+//	jq 'select(.data.http.result.classification.category=="business")'.
 //
 // Rules combine status-code, header, <title> and body regex fingerprints and
 // are evaluated in order, first match wins. The rule schema and the built-in
